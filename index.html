@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bank DApp - Assignment 5</title>
+  <!-- ethers.js = ตัวกลางให้หน้าเว็บคุยกับ MetaMask และ Smart Contract -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: "Segoe UI", Tahoma, sans-serif; background: #eef1f5; margin: 0; padding: 30px 15px; color: #222; }
+    .card { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.08); overflow: hidden; }
+    header { background: #1f3a5f; color: #fff; padding: 18px 22px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+    header h1 { font-size: 18px; margin: 0 0 4px; }
+    header p { margin: 0; font-size: 14px; opacity: .9; }
+    main { padding: 22px; }
+    .box { border: 1px solid #dde2ea; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+    .label { font-size: 13px; color: #666; }
+    .value { font-size: 15px; word-break: break-all; }
+    #balance { font-size: 26px; font-weight: bold; color: #1f3a5f; }
+    input { width: 100%; padding: 10px; font-size: 16px; border: 1px solid #ccd; border-radius: 6px; margin: 8px 0 12px; }
+    button { border: none; border-radius: 6px; padding: 10px 16px; font-size: 15px; cursor: pointer; color: #fff; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .row { display: flex; gap: 10px; }
+    .row button { flex: 1; }
+    #btnConnect { background: #f6851b; }
+    #btnDeposit { background: #2e8b57; }
+    #btnWithdraw { background: #d9534f; }
+    #btnCheck { background: #1f3a5f; margin-top: 10px; }
+    #status { min-height: 48px; font-size: 14px; background: #f7f8fa; }
+    .ok { color: #2e8b57; } .err { color: #d9534f; } .wait { color: #b8860b; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <!-- ส่วนหัว: แสดงรหัสนักศึกษาและชื่อ-สกุล -->
+    <header>
+      <div>
+        <h1>Bank DApp</h1>
+        <p>รหัสนักศึกษา: 66032579 | ชื่อ-สกุล: นันทกร บุญศรี</p>
+      </div>
+      <button id="btnConnect" onclick="connectWallet()">Connect MetaMask</button>
+    </header>
+
+    <main>
+      <div class="box">
+        <div class="label">Wallet Address</div>
+        <div class="value" id="account">ยังไม่ได้เชื่อมต่อ</div>
+        <div class="label" style="margin-top:8px">Contract Address</div>
+        <div class="value" id="contractAddr"></div>
+      </div>
+
+      <div class="box">
+        <div class="label">ยอดเงินใน Bank (Current Balance)</div>
+        <div id="balance">- ETH</div>
+        <button id="btnCheck" onclick="checkBalance()" disabled>Check Balance</button>
+      </div>
+
+      <div class="box">
+        <div class="label">จำนวนเงิน (ETH)</div>
+        <input type="number" id="amount" placeholder="เช่น 0.001" step="0.0001" min="0">
+        <div class="row">
+          <button id="btnDeposit" onclick="deposit()" disabled>Deposit</button>
+          <button id="btnWithdraw" onclick="withdraw()" disabled>Withdraw</button>
+        </div>
+      </div>
+
+      <!-- ส่วนแจ้งสถานะ -->
+      <div class="box" id="status">กรุณากด Connect MetaMask เพื่อเริ่มใช้งาน</div>
+    </main>
+  </div>
+
+<script>
+  // ===== 1) ข้อมูล Smart Contract =====
+  // TODO: เปลี่ยนเป็น address ของ Bank ที่ deploy บน Sepolia เอง
+  const CONTRACT_ADDRESS = "0x0c9804741C1439d586018727D5DEd7AE8c7CEE66";
+
+  // ABI = รายการฟังก์ชันของ contract ที่หน้าเว็บจะเรียกใช้
+  const ABI = [
+    "function deposit() payable",
+    "function withdraw(uint amount)",
+    "function checkBlance() view returns (uint balance)",
+    "event Deposit(address indexed owner, uint amount)",
+    "event Withdraw(address indexed owner, uint amount)"
+  ];
+
+  const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111
+
+  let provider, signer, contract;
+
+  document.getElementById("contractAddr").textContent = CONTRACT_ADDRESS;
+
+  function setStatus(msg, type = "") {
+    const el = document.getElementById("status");
+    el.innerHTML = msg;
+    el.className = "box " + type;
+  }
+
+  function setButtons(enabled) {
+    ["btnDeposit", "btnWithdraw", "btnCheck"].forEach(id => {
+      document.getElementById(id).disabled = !enabled;
+    });
+  }
+
+  // ดึงข้อความ error ให้อ่านง่าย (เช่น "not enough money" จาก require)
+  function errorText(e) {
+    if (e.code === "ACTION_REJECTED") return "ผู้ใช้ยกเลิกธุรกรรมใน MetaMask";
+    return e.reason || e.shortMessage || e.message;
+  }
+
+  // ===== 2) เชื่อมต่อ MetaMask =====
+  async function connectWallet() {
+    if (!window.ethereum) {
+      setStatus("ไม่พบ MetaMask กรุณาติดตั้ง MetaMask ก่อน", "err");
+      return;
+    }
+    try {
+      // ขอสิทธิ์เข้าถึงบัญชี
+      await window.ethereum.request({ method: "eth_requestAccounts" });
+
+      // สลับไป Sepolia ถ้ายังไม่ได้อยู่
+      const chainId = await window.ethereum.request({ method: "eth_chainId" });
+      if (chainId !== SEPOLIA_CHAIN_ID) {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: SEPOLIA_CHAIN_ID }]
+        });
+      }
+
+      // ===== 3) เชื่อมต่อ Smart Contract =====
+      provider = new ethers.BrowserProvider(window.ethereum);
+      signer = await provider.getSigner();                 // signer = msg.sender
+      contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+
+      const addr = await signer.getAddress();
+      document.getElementById("account").textContent = addr;
+      document.getElementById("btnConnect").textContent = "Connected";
+      setButtons(true);
+      setStatus("เชื่อมต่อ MetaMask และ Smart Contract สำเร็จ", "ok");
+
+      await checkBalance();
+    } catch (e) {
+      setStatus("เชื่อมต่อไม่สำเร็จ: " + errorText(e), "err");
+    }
+  }
+
+  // ===== 4) CheckBalance (view: ไม่เสีย gas) =====
+  async function checkBalance() {
+    try {
+      const bal = await contract.checkBlance();
+      document.getElementById("balance").textContent = ethers.formatEther(bal) + " ETH";
+    } catch (e) {
+      setStatus("อ่านยอดเงินไม่สำเร็จ: " + errorText(e), "err");
+    }
+  }
+
+  function getAmount() {
+    const v = document.getElementById("amount").value;
+    if (!v || Number(v) <= 0) {
+      setStatus("กรุณากรอกจำนวนเงินมากกว่า 0", "err");
+      return null;
+    }
+    return ethers.parseEther(v); // แปลง ETH → wei
+  }
+
+  // ===== 5) Deposit (payable: ส่งเงินไปกับ value) =====
+  async function deposit() {
+    const amount = getAmount();
+    if (amount === null) return;
+    try {
+      setButtons(false);
+      setStatus("กรุณายืนยันธุรกรรมใน MetaMask...", "wait");
+      const tx = await contract.deposit({ value: amount });
+      setStatus("Transaction Pending... รอการยืนยันบน Blockchain<br>Tx: " + tx.hash, "wait");
+      await tx.wait();
+      setStatus('Deposit สำเร็จ! <a target="_blank" href="https://sepolia.etherscan.io/tx/' + tx.hash + '">ดูบน Etherscan</a>', "ok");
+      document.getElementById("amount").value = "";
+      await checkBalance();
+    } catch (e) {
+      setStatus("Deposit ไม่สำเร็จ: " + errorText(e), "err");
+    } finally {
+      setButtons(true);
+    }
+  }
+
+  // ===== 6) Withdraw =====
+  async function withdraw() {
+    const amount = getAmount();
+    if (amount === null) return;
+    try {
+      // เช็กก่อนว่ายอดพอไหม (เหมือน require ใน contract) จะได้ไม่เสีย gas ฟรี
+      const bal = await contract.checkBlance();
+      if (amount > bal) {
+        setStatus("ยอดเงินไม่พอ (not enough money) — มีอยู่ " + ethers.formatEther(bal) + " ETH", "err");
+        return;
+      }
+      setButtons(false);
+      setStatus("กรุณายืนยันธุรกรรมใน MetaMask...", "wait");
+      const tx = await contract.withdraw(amount);
+      setStatus("Transaction Pending... รอการยืนยันบน Blockchain<br>Tx: " + tx.hash, "wait");
+      await tx.wait();
+      setStatus('Withdraw สำเร็จ! <a target="_blank" href="https://sepolia.etherscan.io/tx/' + tx.hash + '">ดูบน Etherscan</a>', "ok");
+      document.getElementById("amount").value = "";
+      await checkBalance();
+    } catch (e) {
+      setStatus("Withdraw ไม่สำเร็จ: " + errorText(e), "err");
+    } finally {
+      setButtons(true);
+    }
+  }
+
+  // เปลี่ยนบัญชีใน MetaMask → รีโหลดหน้าเพื่อใช้บัญชีใหม่
+  if (window.ethereum) {
+    window.ethereum.on("accountsChanged", () => location.reload());
+    window.ethereum.on("chainChanged", () => location.reload());
+  }
+</script>
+</body>
+</html>
